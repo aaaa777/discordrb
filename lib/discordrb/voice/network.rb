@@ -30,7 +30,11 @@ module Discordrb::Voice
 
   # Encryption modes supported by Discord
   ENCRYPTION_MODES = %w[xsalsa20_poly1305_lite xsalsa20_poly1305_suffix xsalsa20_poly1305].freeze
+  DECRYPTION_MODES = %w[xsalsa20_poly1305].freeze
 
+  # Audio data identify header
+  AUDIO_DATA_IDENTIFIER = String.new("\x90x", encoding: ::Encoding::ASCII_8BIT)
+  
   # Represents a UDP connection to a voice server. This connection is used to send the actual audio data.
   class VoiceUDP
     # @return [true, false] whether or not UDP communications are encrypted.
@@ -47,11 +51,23 @@ module Discordrb::Voice
     # @!visibility private
     attr_writer :mode
 
+    # for debug
+    attr_accessor :socket
+
     # Creates a new UDP connection. Only creates a socket as the discovery reply may come before the data is
     # initialized.
     def initialize
       @socket = UDPSocket.new
+      p @socket
       @encrypted = true
+      
+      @receiver_filter_ssrc = []
+      @receiver_io = {}
+
+      #ssrc => packet data array
+      @packet_buffer = {}
+
+      # @packet_handler = PacketHandler.new(@socket)
     end
 
     # Initializes the UDP socket with data obtained from opcode 2.
@@ -70,6 +86,8 @@ module Discordrb::Voice
     def receive_discovery_reply
       # Wait for a UDP message
       message = @socket.recv(70)
+      # test
+      p message
       ip = message[4..-3].delete("\0")
       port = message[-2..-1].unpack1('n')
       [ip, port]
@@ -95,6 +113,37 @@ module Discordrb::Voice
       send_packet(data)
     end
 
+    # debug
+
+    def create_io(user = nil)
+      Thread.new do
+        Thread.current[:discordrb_name] = "#{user} stream"
+        recv_packet_loop
+
+      end
+
+      return
+      #user = user.resolve_id
+      #Thread.new do 
+      #  reader, writer = IO.pipe
+      #  @receiver_io[user] = reader
+      #end
+
+
+    end
+
+
+    # @param packet_data [String] Data encoding should be ASCII-8BIT. Any encoding has possibility of including
+    # over 2 bytes charactar is unsuitable.
+    def receive_audio(packet_data)
+      
+      # note: separate nonce from packet_data destructively in some modes. Be care the value of packet_data pointing
+      # to if you call receive_audio method
+      nonce = separate_nonce(packet_data)
+
+      p decrytpt_audio(nonce, packet_data)
+    end
+
     # Sends the UDP discovery packet with the internally stored SSRC. Discord will send a reply afterwards which can
     # be received using {#receive_discovery_reply}
     def send_discovery
@@ -118,6 +167,18 @@ module Discordrb::Voice
 
       # Nonces must be 24 bytes in length. We right pad with null bytes for poly1305 and poly1305_lite
       secret_box.box(nonce.ljust(24, "\0"), buf)
+    end
+
+    # Decrypts audio data using libsodium
+    # @param nonce [String] The nonce to be used to decrypt the data
+    # @param ciphertext [String] The encrypted packet data to be decrypted
+    # @rerurn [String] the audio data, plaintext
+    def decrytpt_audio(nonce, ciphertext)
+      raise 'No secret key found, despite decryption being enabled!' unless @secret_key
+
+      secret_box = Discordrb::Voice::SecretBox.new(@secret_key)
+
+      secret_box.open(nonce.ljust(24, "\0"), ciphertext)
     end
 
     def send_packet(packet)
@@ -149,7 +210,50 @@ module Discordrb::Voice
         raise "`#{@mode}' is not a supported encryption mode"
       end
     end
+
+    def separate_nonce(packet_data)
+      header = packet_data.slice!(0..11)
+      
+      # get the nonce of these modes
+      case @mode
+      when 'xsalsa20_poly1305'
+        # packet header
+        header
+      when 'xsalsa20_poly1305_suffix'
+        # last 24 bytes of packet
+        nonce = packet_data.slice!(-24..-1)
+      when 'xsalsa20_poly1305_lite'
+        # last 4 bytes of packet
+        nonce = packet_data.slice!(-4..-1)
+      else
+        raise "`#{@mode}' is not a supported decryption mode"
+      end
+    end
+
+    def recv_packet_loop
+      @packet_handling = true
+      while true
+        sleep 0.01 while !@packet_handling
+        
+        packet_data = @socket.recv(500)
+        packet_data.force_encoding('ASCII-8BIT')
+
+        # drop other than audio packets
+        next (p "packet dropped info: #{packet_data[0..1]}") if packet_data[0..1] != AUDIO_DATA_IDENTIFIER
+        
+        seq = packet_data[2..3]
+        timestamp = packet_data[4..7].unpack('N')
+        ssrc = packet_data[8..11].unpack('N')
+        
+        receive_audio(packet_data)
+
+        p "#{ssrc}, #{seq}, #{timestamp}"
+      end
+    end
+
   end
+
+
 
   # Represents a websocket client connection to the voice server. The websocket connection (sometimes called vWS) is
   # used to manage general data about the connection, such as sending the speaking packet, which determines the green
@@ -273,6 +377,9 @@ module Discordrb::Voice
         @ready = true
         @udp.secret_key = @ws_data['secret_key'].pack('C*')
         @udp.mode = @ws_data['mode']
+      when 5
+        p 'opcode 5 received'
+        #@udp.some add ssrc filter method
       when 8
         # Opcode 8 contains the heartbeat interval.
         @heartbeat_interval = packet['d']['heartbeat_interval']
@@ -308,6 +415,8 @@ module Discordrb::Voice
 
       # Send UDP init packet with received UDP data
       send_udp_connection(ip, port, @udp_mode)
+
+      p "UDP mode: #{@udp_mode}"
 
       @bot.debug('Waiting for op 4 now')
 

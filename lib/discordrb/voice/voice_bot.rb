@@ -1,5 +1,5 @@
 # frozen_string_literal: true
-
+require 'discordrb/voice/packet_handler'
 require 'discordrb/voice/encoder'
 require 'discordrb/voice/network'
 require 'discordrb/logger'
@@ -100,6 +100,11 @@ module Discordrb::Voice
     rescue StandardError => e
       Discordrb::LOGGER.log_exception(e)
       raise
+    end
+
+    # debug
+    def socket
+      @udp.socket
     end
 
     # @return [true, false] whether audio data sent will be encrypted.
@@ -294,6 +299,15 @@ module Discordrb::Voice
     end
 
     alias_method :play_stream, :play_io
+
+    def create_io_by_user(user = 0)
+      user = user.resolve_id
+      @udp.create_io(user)
+
+
+    end
+
+    alias_method :record_voice, :create_io_by_user
 
     private
 
