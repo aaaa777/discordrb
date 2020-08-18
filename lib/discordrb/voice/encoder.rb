@@ -91,6 +91,38 @@ module Discordrb::Voice
       IO.popen(command, in: io)
     end
 
+    # encode io raw audio data to other formats. just adding audio header only
+    def decode_io(io, options = '')
+      command = "#{ffmpeg_command} -loglevel 0 -f s16le -ar 48000 -ac 2 -i - #{options} pipe:1"
+      IO.popen(command, in: io)
+    end
+
+    # pipe:fd would work? I dont know 
+    # do not use this is wip
+    def mix_io(*io_array)
+      r, w = IO.pipe
+      inputs = io_array.map{|io| "-f s16le -ar 48000 -ac 2 -i pipe:#{io.fileno}"}
+      redirects = io_array.map{|io| [io.fileno, io]}.to_hash
+      redirects[:out] = w
+      redirects[:close_others] = true
+
+      command = "#{ffmpeg_command} -loglevel 0 #{inputs.join(' ')} #{some_mix_action} #{options} pipe:1"
+      begin
+        spawn(command, redirects)
+      
+      rescue ArgumentError => error
+        # ruby 2.5.8 with rubinstaller couldnt open new fd
+        inputs = io_array.map{|io| "-f s16le -ar 48000 -ac 2 -i \"#{exchange_io_path(io)}\""}
+        command = "#{ffmpeg_command} -loglevel 0 #{inputs.join(' ')} #{some_mix_action} #{options} pipe:1"
+        spawn(command, out: w, close_others: true)
+
+        return r
+        # or implement pcm raw io mixer
+        raw_io_mix(w, io_array)
+      end
+      r
+    end
+
     private
 
     def ffmpeg_command
@@ -102,5 +134,35 @@ module Discordrb::Voice
 
       @use_avconv ? "-vol #{(@filter_volume * 256).ceil}" : "-af volume=#{@filter_volume}"
     end
+
+    # return tfile
+    def exchange_io_path(io)
+      tfile = Tempfile.new('', nil, 'w')
+      Thread.new do
+        while true
+          begin
+            tfile.write(io.readpartial(10000))
+            Thread.pass
+          rescue EOFError
+            break
+          end
+        end
+        tfile.close
+      end
+      tfile.path
+    end
+
+    # handmade pcm raw io mixer
+    def raw_io_mix(w, io_array)
+      Thread.new do
+        io_array.each{|io| io.set_encoding('ASCII-8BIT')}
+        while true
+          data_array = io_array.map{|io| io.readpartial(2).unpack1('s<')}
+          # mix
+          w.write([(data_array.sum / data_array.size).to_s].pack('s<'))
+        end
+      end
+    end
+
   end
 end

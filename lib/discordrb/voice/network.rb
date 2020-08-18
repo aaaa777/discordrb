@@ -30,7 +30,6 @@ module Discordrb::Voice
 
   # Encryption modes supported by Discord
   ENCRYPTION_MODES = %w[xsalsa20_poly1305_lite xsalsa20_poly1305_suffix xsalsa20_poly1305].freeze
-  DECRYPTION_MODES = %w[xsalsa20_poly1305].freeze
 
   # Audio data identify header
   AUDIO_DATA_IDENTIFIER = String.new("\x90x", encoding: ::Encoding::ASCII_8BIT)
@@ -51,6 +50,9 @@ module Discordrb::Voice
     # @!visibility private
     attr_writer :mode
 
+    # @!visibility private
+    attr_accessor :user_ssrc
+
     # for debug
     attr_accessor :socket
 
@@ -61,11 +63,13 @@ module Discordrb::Voice
       p @socket
       @encrypted = true
       
-      @receiver_filter_ssrc = []
-      @receiver_io = {}
+      # user_id => recent ssrc
+      @user_ssrc = {}
 
-      #ssrc => packet data array
-      @packet_buffer = {}
+      #@last_sequence = {}
+      # ssrc => packet data array
+      #@packet_buffer = {}
+      @await_threads = []
 
       # @packet_handler = PacketHandler.new(@socket)
     end
@@ -113,39 +117,137 @@ module Discordrb::Voice
       send_packet(data)
     end
 
-    # debug
-
-    def create_io(user = nil)
-      Thread.new do
-        Thread.current[:discordrb_name] = "#{user} stream"
-        recv_packet_loop
-
-      end
-
-      return
-      #user = user.resolve_id
-      #Thread.new do 
-      #  reader, writer = IO.pipe
-      #  @receiver_io[user] = reader
-      #end
-
-
+    # send packet to all awaiting methods via @received_packet_data
+    def receive_packet(*data)
+      p 'emit packet signal!'
+      # set data
+      @received_packet_data = data
+      # emit signal
+      @packet_was_received = true
+      # await all await_packet yield
+      @await_threads.each{|th| th.join}
+      # clear awaits
+      @await_threads = []
+      # clear data(this is may not necessary)
+      @received_packet_data = nil
+      # reset signal(this signal releases await_packet completely)
+      @packet_was_received = false
     end
 
+    # debug
+    # blocking method
+    # await packet receive flag
+    def await_packet
+      p 'awaiting packet'
+      thread = Thread.new do
+        # block till receiving packet
+        Thread.pass while !@packet_was_received
+        yield(@received_packet_data)
+      end
+      @await_threads << thread
 
-    # @param packet_data [String] Data encoding should be ASCII-8BIT. Any encoding has possibility of including
-    # over 2 bytes charactar is unsuitable.
-    def receive_audio(packet_data)
+      # blocking thread till receive packet
+      thread.join
+      p 'yield is done'
+      # block while @packet_was_received is true
+      Thread.pass while @packet_was_received
+    end
+
+    def create_io(user)
+      user = user.resolve_id
+
+      # create packet handler if it isn't existed
+      @thread = Thread.new do
+        Thread.current[:discordrb_name] = "packet hundler"
+
+        recv_packet_loop
+      end unless @thread
       
-      # note: separate nonce from packet_data destructively in some modes. Be care the value of packet_data pointing
-      # to if you call receive_audio method
-      nonce = separate_nonce(packet_data)
+      reader, writer = IO.pipe
 
-      p decrytpt_audio(nonce, packet_data)
+      Thread.new do
+        Thread.current[:discordrb_name] = "#{user} voice stream"
+        
+        push_io_loop(writer, user)
+      end
+      
+      reader
+    end
+
+    # note: buffer grace time should be implemented
+    def push_io_loop(writer, user)
+
+      next_seq = nil
+      last_ssrc = @user_ssrc[user]
+      last_timestamp = nil
+      buffer = {}
+
+      # packet reveiving loop
+      while true
+        # await packet
+        await_packet do |audio_data, ssrc, seq, timestamp|
+          p "packet received: ssrc: d-#{@user_ssrc[user]} i-#{ssrc}, seq: #{seq}, timestamp: #{timestamp}"
+
+          # check whether changing user ssrc by reconnecting vc
+          unless @user_ssrc[user] == last_ssrc
+            p "ssrc changed"
+            # if changed clear old ssrc and buffer
+            last_ssrc = @user_ssrc[user]
+            next_seq = nil
+            # note: if there are enough buffer data that they cannot be ignored?
+            buffer = {}
+          end
+          # drop other than specific user packet
+          next if last_ssrc != ssrc
+  
+          # received now neccesary packet or first packet
+          if seq == next_seq || !next_seq
+            while true
+              # debug
+              p "[audio-io-#{user}] wrote data: #{audio_data.force_encoding('ASCII-8BIT').size} bytes"
+              writer.write(audio_data)
+              # received first packet
+              next_seq = seq unless next_seq
+              last_timestamp = timestamp if timestamp
+              # increment next_seq
+              case next_seq
+              when 0xff_ff
+                next_seq = 0
+              else
+                next_seq += 1
+              end
+              
+              # note: packet based io grace should be changed to timestamp based
+              buffer[next_seq] = ["\0" * 48000, nil] if buffer.size > 10
+              
+              # await next packet if there isnt next packet buffer
+              break unless buffer[next_seq]
+              
+              # read buffer data
+              audio_data, timestamp = buffer[next_seq]
+              buffer[next_seq] = nil
+              
+              # 0 patted data
+              next unless timestamp
+              # drop old buffer
+              break if last_timestamp > timestamp
+            end
+
+
+          # buffer data
+          else
+            # note: we should drop packet if last_timestamp > timestamp
+            buffer[seq] = [audio_data, timestamp]
+            
+          end
+  
+        end
+        
+      end
     end
 
     # Sends the UDP discovery packet with the internally stored SSRC. Discord will send a reply afterwards which can
-    # be received using {#receive_discovery_reply}
+    #   be received using {#receive_discovery_reply}
     def send_discovery
       discovery_packet = [@ssrc].pack('N')
 
@@ -155,6 +257,27 @@ module Discordrb::Voice
     end
 
     private
+
+
+    
+    # @param packet_data [String] Data encoding should be ASCII-8BIT. Any encoding has possibility of including
+    # over 2 bytes charactar is unsuitable.
+    def receive_audio(packet_data)
+      seq = packet_data[2..3].unpack1('n')
+      timestamp = packet_data[4..7].unpack1('N')
+      ssrc = packet_data[8..11].unpack1('N')
+
+      # @note separate nonce and header from packet_data destructively. Be care the value of packet_data pointing
+      #   to if you call receive_audio method.
+      nonce = separate_nonce!(packet_data)
+      audio_data = decrytpt_audio(nonce, packet_data)
+
+      #p "[ssrc-#{ssrc}]: seq: #{seq}, timestamp: #{timestamp}"
+      #p audio_data
+      # @note we may receive not only audio data but also video data in the nearly future...
+      #   then we should rearrange data array to give receive_packet
+      receive_packet(audio_data, ssrc, seq, timestamp)
+    end
 
     # Encrypts audio data using libsodium
     # @param buf [String] The encoded audio data to be encrypted
@@ -178,7 +301,7 @@ module Discordrb::Voice
 
       secret_box = Discordrb::Voice::SecretBox.new(@secret_key)
 
-      secret_box.open(nonce.ljust(24, "\0"), ciphertext)
+      secret_box.open(nonce.ljust(24, "\0"), ciphertext).force_encoding('ASCII-8BIT')
     end
 
     def send_packet(packet)
@@ -211,7 +334,7 @@ module Discordrb::Voice
       end
     end
 
-    def separate_nonce(packet_data)
+    def separate_nonce!(packet_data)
       header = packet_data.slice!(0..11)
       
       # get the nonce of these modes
@@ -239,15 +362,15 @@ module Discordrb::Voice
         packet_data.force_encoding('ASCII-8BIT')
 
         # drop other than audio packets
-        next (p "packet dropped info: #{packet_data[0..1]}") if packet_data[0..1] != AUDIO_DATA_IDENTIFIER
+        next (p "packet dropped id: #{packet_data[0..1]}, data: #{packet_data}") if packet_data[0..1] != AUDIO_DATA_IDENTIFIER
         
-        seq = packet_data[2..3]
-        timestamp = packet_data[4..7].unpack('N')
-        ssrc = packet_data[8..11].unpack('N')
+        seq = packet_data[2..3].unpack1('n')
+        timestamp = packet_data[4..7].unpack1('N')
+        ssrc = packet_data[8..11].unpack1('N')
         
         receive_audio(packet_data)
 
-        p "#{ssrc}, #{seq}, #{timestamp}"
+        p "[ssrc-#{ssrc}]: seq: #{seq}, timestamp: #{timestamp}"
       end
     end
 
@@ -378,8 +501,12 @@ module Discordrb::Voice
         @udp.secret_key = @ws_data['secret_key'].pack('C*')
         @udp.mode = @ws_data['mode']
       when 5
+        # debug msg
         p 'opcode 5 received'
+        @ws_data = packet['d']
+        
         #@udp.some add ssrc filter method
+        @udp.user_ssrc[@ws_data['user_id'].to_i] = @ws_data['ssrc'].to_i
       when 8
         # Opcode 8 contains the heartbeat interval.
         @heartbeat_interval = packet['d']['heartbeat_interval']
