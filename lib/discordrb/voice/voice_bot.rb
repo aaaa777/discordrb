@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 require 'discordrb/voice/packet_handler'
 require 'discordrb/voice/encoder'
+require 'discordrb/voice/decoder'
 require 'discordrb/voice/network'
 require 'discordrb/logger'
 
@@ -300,9 +301,9 @@ module Discordrb::Voice
 
     alias_method :play_stream, :play_io
 
-    def create_io_by_user(user, *options)
+    def create_io_by_user(user, **options)
       user = user.resolve_id
-      @udp.create_io(user, options)
+      @udp.create_audio_io(user, options)
 
 
     end

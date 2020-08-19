@@ -12,6 +12,7 @@ end
 # sould this class definition be marged to encoder.rb?
 module Discordrb::Voice
   # this class is only for decoding rtp packet data.
+
   class Decoder
     # create a new decoder
     def initialize

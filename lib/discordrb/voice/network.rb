@@ -31,9 +31,6 @@ module Discordrb::Voice
   # Encryption modes supported by Discord
   ENCRYPTION_MODES = %w[xsalsa20_poly1305_lite xsalsa20_poly1305_suffix xsalsa20_poly1305].freeze
 
-  # Audio data identify header
-  AUDIO_DATA_IDENTIFIER = String.new("\x90x", encoding: ::Encoding::ASCII_8BIT)
-  
   # Represents a UDP connection to a voice server. This connection is used to send the actual audio data.
   class VoiceUDP
     # @return [true, false] whether or not UDP communications are encrypted.
@@ -67,12 +64,8 @@ module Discordrb::Voice
       # user_id => recent ssrc
       @user_ssrc = {}
 
-      # create packet handler if it isn't existed
-      @thread = Thread.new do
-        Thread.current[:discordrb_name] = "packet hundler"
-
-        recv_packet_loop
-      end
+      # create packet handler
+      @packet_handler = Discordrb::Voice::PacketHandler.new(@socket)
 
       @await_threads = []
       # @packet_handler = PacketHandler.new(@socket)
@@ -121,135 +114,91 @@ module Discordrb::Voice
       send_packet(data)
     end
 
-    # send packet to all awaiting methods via @received_packet_data
-    def receive_packet(*data)
-      # set data
-      @received_packet_data = data
-      # emit signal
-      #@packet_was_received = true
-      # await all await_packet yield
-      @await_threads.each{|th| th.join}
-      # clear awaits
-      @await_threads = []
-      # clear data 
-      @received_packet_data = nil
-      # reset signal(this signal releases await_packet completely)
-      #@packet_was_received = false
+    def set_ssrc(user, ssrc)
+      @user_ssrc[user] = ssrc
     end
 
-    # debug and private
-    # blocking method
-    # await packet receive flag
-    def await_packet
-      # make await thread and it list
-      thread = Thread.new do
-        # block till receiving packet
-        Thread.pass while !@received_packet_data
-        yield(@received_packet_data) if block_given?
-      end
-      @await_threads << thread
-
-      # blocking thread till receive packet
-      thread.join
-      # block while @packet_was_received is true
-      Thread.pass while @received_packet_data
-    end
-
-    def create_io(user, *options)
-      user = user.resolve_id
-      reader, writer = IO.pipe
-
-      Thread.new do
-        Thread.current[:discordrb_name] = "#{user} voice stream"
-        # debug
-        #Thread.current[:recorder_log_mode] = options[:log_mode]
-        push_io_loop(writer, user)
-      end
-
-      reader
-    end
-
-    # note: buffer grace time should be implemented
-    def push_io_loop(writer, user)
-
+    # call packethandler#create_io
+    def create_audio_io(user, **options)
       decoder = Discordrb::Voice::Decoder.new
+      options[:packet_type] = :audio
+      
+      # see packethandler#create_io description
+      @packet_handler.create_io(user, options) do |packet_data|
+        p packet_data
+        # @note we may receive not only audio data but also video data in the nearly future...
+        seq = packet_data[2..3].unpack1('n')
+        timestamp = packet_data[4..7].unpack1('N')
+        ssrc = packet_data[8..11].unpack1('N')
 
-      next_seq = nil
-      last_ssrc = @user_ssrc[user]
-      last_timestamp = nil
-      buffer = {}
+        audio_data = receive_audio(packet_data)
 
-      # packet reveiving loop
-      while true
-        # await packet
-        await_packet do |audio_data, ssrc, seq, timestamp|
-          
-          # check whether changing user ssrc by reconnecting vc
-          unless @user_ssrc[user] == last_ssrc
-            p "ssrc changed"
-            # if changed clear old ssrc and buffer
-            last_ssrc = @user_ssrc[user]
-            next_seq = nil
-            # note: if there are enough buffer data that they cannot be ignored?
-            buffer = {}
-          end
-          # drop other than specific user packet
-          next if last_ssrc != ssrc
-          p "packet received: datasize: #{audio_data.size}, ssrc: d-#{@user_ssrc[user]} i-#{ssrc}, seq: #{seq}, timestamp: #{timestamp}"
-          
-          # note: packet based io grace should be changed to timestamp based
-          if seq != next_seq && buffer.size > 10
-            buffer[seq] = audio_data, timestamp
-            audio_data, timestamp = "", nil
-            seq = next_seq
-          end
-          # received now neccesary packet or first packet
-          if seq == next_seq || !next_seq
-            # buffer loop
-            while true
-              # debug
-              p "[audio-io-#{user}] wrote data: #{audio_data.size} bytes"
-              writer.write(audio_data)
-              # received first packet
-              next_seq = seq unless next_seq
-              last_timestamp = timestamp if timestamp
-              # increment next_seq
-              case next_seq
-              when 0xff_ff
-                next_seq = 0
-              else
-                next_seq += 1
-              end
-              
-              p "nextbuff: #{buffer[next_seq]}"
-              
-              # await next packet if there isnt next packet buffer
-              break unless buffer[next_seq]
-              
-              # read buffer data
-              audio_data, timestamp = buffer[next_seq]
-              buffer[next_seq] = nil
-              
-              # 0 patted data
-              next unless timestamp
-              # drop old buffer
-              break if last_timestamp > timestamp
-            end
-            
-            
-            # buffer data
-          else
-
-            p "packet bufferd buffsize: #{buffer.size}"
-            # note: we should drop packet if last_timestamp > timestamp
-            buffer[seq] = [audio_data, timestamp]
-            
-          end
-  
+        # check whether changing user ssrc by reconnecting vc
+        unless @user_ssrc[user_id] == last_ssrc
+          p "ssrc changed"
+          # if changed clear old ssrc and buffer
+          last_ssrc = @user_ssrc[user_id]
+          next_seq = nil
+          # note: if there are enough buffer data that they cannot be ignored?
+          buffer = {}
+          decoder.reset
         end
-        
+        # drop other than specific user packet
+        next if last_ssrc != ssrc
+        p "packet received: datasize: #{audio_data.size}, ssrc: d-#{@user_ssrc[user_id]} i-#{ssrc}, seq: #{seq}, timestamp: #{timestamp}"
+
+        # note: packet based io grace should be changed to timestamp based
+        if seq != next_seq && buffer.size > 10
+          buffer[seq] = audio_data, timestamp
+          audio_data, timestamp = "", nil
+          seq = next_seq
+        end
+        # received now neccesary packet or first packet
+        if seq == next_seq || !next_seq
+          # buffer loop
+          while true
+            # debug
+            p "[audio-io-#{user}] wrote data: #{audio_data.size} bytes"
+            writer.write(audio_data)
+            # received first packet
+            next_seq = seq unless next_seq
+            last_timestamp = timestamp if timestamp
+            # increment next_seq
+            case next_seq
+            when 0xff_ff
+              next_seq = 0
+            else
+              next_seq += 1
+            end
+
+            p "nextbuff: #{buffer[next_seq]}"
+
+            # await next packet if there isnt next packet buffer
+            break unless buffer[next_seq]
+
+            # read buffer data
+            audio_data, timestamp = buffer[next_seq]
+            buffer[next_seq] = nil
+
+            # 0 patted data
+            next unless timestamp
+            # drop old buffer
+            break if last_timestamp > timestamp
+          end
+
+
+          # buffer data
+        else
+          p "packet bufferd buffsize: #{buffer.size}"
+          # note: we should drop packet if last_timestamp > timestamp
+          buffer[seq] = [audio_data, timestamp]
+
+        end
+  
+
       end
     end
+
 
     # Sends the UDP discovery packet with the internally stored SSRC. Discord will send a reply afterwards which can
     #   be received using {#receive_discovery_reply}
@@ -263,25 +212,21 @@ module Discordrb::Voice
 
     private
 
-
     
     # @param packet_data [String] Data encoding should be ASCII-8BIT. Any encoding has possibility of including
     # over 2 bytes charactar is unsuitable.
     def receive_audio(packet_data)
-      seq = packet_data[2..3].unpack1('n')
-      timestamp = packet_data[4..7].unpack1('N')
-      ssrc = packet_data[8..11].unpack1('N')
-
       # @note separate nonce and header from packet_data destructively. Be care the value of packet_data pointing
       #   to if you call receive_audio method.
       nonce = separate_nonce!(packet_data)
-      audio_data = decrytpt_audio(nonce, packet_data)
+      
+      # return audio data
+      decrytpt_audio(nonce, packet_data)
 
       #p "[ssrc-#{ssrc}]: seq: #{seq}, timestamp: #{timestamp}"
       #p audio_data
-      # @note we may receive not only audio data but also video data in the nearly future...
-      #   then we should rearrange data array to give receive_packet
-      receive_packet(audio_data, ssrc, seq, timestamp)
+
+      #receive_packet(audio_data, ssrc, seq, timestamp)
     end
 
     # Encrypts audio data using libsodium
@@ -369,9 +314,7 @@ module Discordrb::Voice
         # drop other than audio packets
         next (p "packet dropped id: #{packet_data[0..1]}, data: #{packet_data}") if packet_data[0..1] != AUDIO_DATA_IDENTIFIER
         
-        seq = packet_data[2..3].unpack1('n')
-        timestamp = packet_data[4..7].unpack1('N')
-        ssrc = packet_data[8..11].unpack1('N')
+
         
         receive_audio(packet_data)
 
@@ -511,7 +454,7 @@ module Discordrb::Voice
         @ws_data = packet['d']
         
         #@udp.some add ssrc filter method
-        @udp.user_ssrc[@ws_data['user_id'].to_i] = @ws_data['ssrc'].to_i
+        @udp.set_ssrc([@ws_data['user_id'].to_i], @ws_data['ssrc'].to_i)
       when 8
         # Opcode 8 contains the heartbeat interval.
         @heartbeat_interval = packet['d']['heartbeat_interval']
