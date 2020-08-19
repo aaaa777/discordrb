@@ -54,6 +54,7 @@ module Discordrb::Voice
     attr_accessor :user_ssrc
 
     # for debug
+    # socket is private
     attr_accessor :socket
 
     # Creates a new UDP connection. Only creates a socket as the discovery reply may come before the data is
@@ -66,11 +67,14 @@ module Discordrb::Voice
       # user_id => recent ssrc
       @user_ssrc = {}
 
-      #@last_sequence = {}
-      # ssrc => packet data array
-      #@packet_buffer = {}
-      @await_threads = []
+      # create packet handler if it isn't existed
+      @thread = Thread.new do
+        Thread.current[:discordrb_name] = "packet hundler"
 
+        recv_packet_loop
+      end
+
+      @await_threads = []
       # @packet_handler = PacketHandler.new(@socket)
     end
 
@@ -119,63 +123,56 @@ module Discordrb::Voice
 
     # send packet to all awaiting methods via @received_packet_data
     def receive_packet(*data)
-      p 'emit packet signal!'
       # set data
       @received_packet_data = data
       # emit signal
-      @packet_was_received = true
+      #@packet_was_received = true
       # await all await_packet yield
       @await_threads.each{|th| th.join}
       # clear awaits
       @await_threads = []
-      # clear data(this is may not necessary)
+      # clear data 
       @received_packet_data = nil
       # reset signal(this signal releases await_packet completely)
-      @packet_was_received = false
+      #@packet_was_received = false
     end
 
-    # debug
+    # debug and private
     # blocking method
     # await packet receive flag
     def await_packet
-      p 'awaiting packet'
+      # make await thread and it list
       thread = Thread.new do
         # block till receiving packet
-        Thread.pass while !@packet_was_received
-        yield(@received_packet_data)
+        Thread.pass while !@received_packet_data
+        yield(@received_packet_data) if block_given?
       end
       @await_threads << thread
 
       # blocking thread till receive packet
       thread.join
-      p 'yield is done'
       # block while @packet_was_received is true
-      Thread.pass while @packet_was_received
+      Thread.pass while @received_packet_data
     end
 
-    def create_io(user)
+    def create_io(user, *options)
       user = user.resolve_id
-
-      # create packet handler if it isn't existed
-      @thread = Thread.new do
-        Thread.current[:discordrb_name] = "packet hundler"
-
-        recv_packet_loop
-      end unless @thread
-      
       reader, writer = IO.pipe
 
       Thread.new do
         Thread.current[:discordrb_name] = "#{user} voice stream"
-        
+        # debug
+        #Thread.current[:recorder_log_mode] = options[:log_mode]
         push_io_loop(writer, user)
       end
-      
+
       reader
     end
 
     # note: buffer grace time should be implemented
     def push_io_loop(writer, user)
+
+      decoder = Discordrb::Voice::Decoder.new
 
       next_seq = nil
       last_ssrc = @user_ssrc[user]
@@ -186,8 +183,7 @@ module Discordrb::Voice
       while true
         # await packet
         await_packet do |audio_data, ssrc, seq, timestamp|
-          p "packet received: ssrc: d-#{@user_ssrc[user]} i-#{ssrc}, seq: #{seq}, timestamp: #{timestamp}"
-
+          
           # check whether changing user ssrc by reconnecting vc
           unless @user_ssrc[user] == last_ssrc
             p "ssrc changed"
@@ -199,12 +195,20 @@ module Discordrb::Voice
           end
           # drop other than specific user packet
           next if last_ssrc != ssrc
-  
+          p "packet received: datasize: #{audio_data.size}, ssrc: d-#{@user_ssrc[user]} i-#{ssrc}, seq: #{seq}, timestamp: #{timestamp}"
+          
+          # note: packet based io grace should be changed to timestamp based
+          if seq != next_seq && buffer.size > 10
+            buffer[seq] = audio_data, timestamp
+            audio_data, timestamp = "", nil
+            seq = next_seq
+          end
           # received now neccesary packet or first packet
           if seq == next_seq || !next_seq
+            # buffer loop
             while true
               # debug
-              p "[audio-io-#{user}] wrote data: #{audio_data.force_encoding('ASCII-8BIT').size} bytes"
+              p "[audio-io-#{user}] wrote data: #{audio_data.size} bytes"
               writer.write(audio_data)
               # received first packet
               next_seq = seq unless next_seq
@@ -217,8 +221,7 @@ module Discordrb::Voice
                 next_seq += 1
               end
               
-              # note: packet based io grace should be changed to timestamp based
-              buffer[next_seq] = ["\0" * 48000, nil] if buffer.size > 10
+              p "nextbuff: #{buffer[next_seq]}"
               
               # await next packet if there isnt next packet buffer
               break unless buffer[next_seq]
@@ -232,10 +235,12 @@ module Discordrb::Voice
               # drop old buffer
               break if last_timestamp > timestamp
             end
-
-
-          # buffer data
+            
+            
+            # buffer data
           else
+
+            p "packet bufferd buffsize: #{buffer.size}"
             # note: we should drop packet if last_timestamp > timestamp
             buffer[seq] = [audio_data, timestamp]
             
@@ -356,7 +361,7 @@ module Discordrb::Voice
     def recv_packet_loop
       @packet_handling = true
       while true
-        sleep 0.01 while !@packet_handling
+        Thread.pass while !@packet_handling
         
         packet_data = @socket.recv(500)
         packet_data.force_encoding('ASCII-8BIT')
@@ -370,7 +375,7 @@ module Discordrb::Voice
         
         receive_audio(packet_data)
 
-        p "[ssrc-#{ssrc}]: seq: #{seq}, timestamp: #{timestamp}"
+        #p "[ssrc-#{ssrc}]: seq: #{seq}, timestamp: #{timestamp}"
       end
     end
 

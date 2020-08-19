@@ -300,9 +300,9 @@ module Discordrb::Voice
 
     alias_method :play_stream, :play_io
 
-    def create_io_by_user(user = 0)
+    def create_io_by_user(user, *options)
       user = user.resolve_id
-      @udp.create_io(user)
+      @udp.create_io(user, options)
 
 
     end

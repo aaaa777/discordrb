@@ -1,3 +1,5 @@
+
+# deprecated class
 module Discordrb::Voice
 
   class PacketHandler
