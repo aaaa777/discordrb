@@ -9,7 +9,7 @@ end
 
 
 # voice decoder
-# sould this class definition be marged to encoder.rb?
+# should this class definition be marged into encoder.rb?
 module Discordrb::Voice
   # this class is only for decoding rtp packet data.
 

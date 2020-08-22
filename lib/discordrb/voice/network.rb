@@ -65,7 +65,7 @@ module Discordrb::Voice
       @user_ssrc = {}
 
       # create packet handler
-      @packet_handler = Discordrb::Voice::PacketHandler.new(@socket)
+      @packet_handler = Discordrb::Voice::PacketHandler.new(@socket, self)
 
       @await_threads = []
       # @packet_handler = PacketHandler.new(@socket)
@@ -114,30 +114,46 @@ module Discordrb::Voice
       send_packet(data)
     end
 
-    def set_ssrc(user, ssrc)
-      @user_ssrc[user] = ssrc
+    def set_ssrc(user_id, ssrc)
+      @user_ssrc[user_id] = ssrc
+    end
+
+    def get_ssrc(user_id)
+      @user_ssrc[user_id]
+    end
+
+    def get_user(ssrc)
+      res = @user_ssrc.key(ssrc)
+      res ? res.first : nil
     end
 
     # call packethandler#create_io
     def create_audio_io(user, **options)
+      user = user.resolve_id
+      @packet_handler.start unless @packet_handler.is_active?
+
       decoder = Discordrb::Voice::Decoder.new
-      options[:packet_type] = :audio
-      
+      #options[:packet_type] = :audio
+
       # see packethandler#create_io description
-      @packet_handler.create_io(user, options) do |packet_data|
-        p packet_data
+      @packet_handler.create_io(user: user, packet_type: :audio, **options) do |packet_data|
         # @note we may receive not only audio data but also video data in the nearly future...
+        
+        # parse data
         seq = packet_data[2..3].unpack1('n')
         timestamp = packet_data[4..7].unpack1('N')
         ssrc = packet_data[8..11].unpack1('N')
 
         audio_data = receive_audio(packet_data)
+        p 'decode data'
+        next decoder.decode(audio_data)
+        # decode end
 
         # check whether changing user ssrc by reconnecting vc
-        unless @user_ssrc[user_id] == last_ssrc
+        unless get_ssrc(user) == last_ssrc
           p "ssrc changed"
           # if changed clear old ssrc and buffer
-          last_ssrc = @user_ssrc[user_id]
+          last_ssrc = get_ssrc(user)
           next_seq = nil
           # note: if there are enough buffer data that they cannot be ignored?
           buffer = {}
@@ -145,21 +161,21 @@ module Discordrb::Voice
         end
         # drop other than specific user packet
         next if last_ssrc != ssrc
-        p "packet received: datasize: #{audio_data.size}, ssrc: d-#{@user_ssrc[user_id]} i-#{ssrc}, seq: #{seq}, timestamp: #{timestamp}"
+        #p "packet received: datasize: #{audio_data.size}, ssrc: d-#{@user_ssrc[user_id]} i-#{ssrc}, seq: #{seq}, timestamp: #{timestamp}"
 
         # note: packet based io grace should be changed to timestamp based
-        if seq != next_seq && buffer.size > 10
-          buffer[seq] = audio_data, timestamp
-          audio_data, timestamp = "", nil
-          seq = next_seq
-        end
+        #if seq != next_seq && buffer.size > 10
+        #  buffer[seq] = audio_data, timestamp
+        #  audio_data, timestamp = "", nil
+        #  seq = next_seq
+        #end
         # received now neccesary packet or first packet
         if seq == next_seq || !next_seq
           # buffer loop
           while true
             # debug
-            p "[audio-io-#{user}] wrote data: #{audio_data.size} bytes"
-            writer.write(audio_data)
+            #p "[audio-io-#{user}] wrote data: #{audio_data.size} bytes"
+            buff += decoder.decode(audio_data)
             # received first packet
             next_seq = seq unless next_seq
             last_timestamp = timestamp if timestamp
@@ -171,7 +187,7 @@ module Discordrb::Voice
               next_seq += 1
             end
 
-            p "nextbuff: #{buffer[next_seq]}"
+            #p "nextbuff: #{buffer[next_seq]}"
 
             # await next packet if there isnt next packet buffer
             break unless buffer[next_seq]
@@ -189,13 +205,13 @@ module Discordrb::Voice
 
           # buffer data
         else
-          p "packet bufferd buffsize: #{buffer.size}"
+          #p "packet bufferd buffsize: #{buffer.size}"
           # note: we should drop packet if last_timestamp > timestamp
           buffer[seq] = [audio_data, timestamp]
 
         end
   
-
+        buff
       end
     end
 
