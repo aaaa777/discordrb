@@ -145,73 +145,13 @@ module Discordrb::Voice
         ssrc = packet_data[8..11].unpack1('N')
 
         audio_data = receive_audio(packet_data)
-        p 'decode data'
-        next decoder.decode(audio_data)
+        buffer = decoder.decode(audio_data)
+        p "decoded data: #{buffer.size} bytes"
         # decode end
-
-        # check whether changing user ssrc by reconnecting vc
-        unless get_ssrc(user) == last_ssrc
-          p "ssrc changed"
-          # if changed clear old ssrc and buffer
-          last_ssrc = get_ssrc(user)
-          next_seq = nil
-          # note: if there are enough buffer data that they cannot be ignored?
-          buffer = {}
-          decoder.reset
-        end
-        # drop other than specific user packet
-        next if last_ssrc != ssrc
-        #p "packet received: datasize: #{audio_data.size}, ssrc: d-#{@user_ssrc[user_id]} i-#{ssrc}, seq: #{seq}, timestamp: #{timestamp}"
-
-        # note: packet based io grace should be changed to timestamp based
-        #if seq != next_seq && buffer.size > 10
-        #  buffer[seq] = audio_data, timestamp
-        #  audio_data, timestamp = "", nil
-        #  seq = next_seq
-        #end
-        # received now neccesary packet or first packet
-        if seq == next_seq || !next_seq
-          # buffer loop
-          while true
-            # debug
-            #p "[audio-io-#{user}] wrote data: #{audio_data.size} bytes"
-            buff += decoder.decode(audio_data)
-            # received first packet
-            next_seq = seq unless next_seq
-            last_timestamp = timestamp if timestamp
-            # increment next_seq
-            case next_seq
-            when 0xff_ff
-              next_seq = 0
-            else
-              next_seq += 1
-            end
-
-            #p "nextbuff: #{buffer[next_seq]}"
-
-            # await next packet if there isnt next packet buffer
-            break unless buffer[next_seq]
-
-            # read buffer data
-            audio_data, timestamp = buffer[next_seq]
-            buffer[next_seq] = nil
-
-            # 0 patted data
-            next unless timestamp
-            # drop old buffer
-            break if last_timestamp > timestamp
-          end
-
-
-          # buffer data
-        else
-          #p "packet bufferd buffsize: #{buffer.size}"
-          # note: we should drop packet if last_timestamp > timestamp
-          buffer[seq] = [audio_data, timestamp]
-
-        end
-  
-        buff
+        #buffer.split(//).join("\x00") + "\x00"
+        buffer.scan(/../).map{|hex| hex + hex}.join # stereo
+        #buffer.scan(/../).map{|hex| hex + "\x00\x00"}.join # mono  
+        #buffer
       end
     end
 

@@ -303,9 +303,8 @@ module Discordrb::Voice
 
     def create_io_by_user(user, **options)
       user = user.resolve_id
-      @udp.create_audio_io(user, options)
-
-
+      io = @udp.create_audio_io(user, options)
+      @encoder.decode_io(io)
     end
 
     alias_method :record_voice, :create_io_by_user

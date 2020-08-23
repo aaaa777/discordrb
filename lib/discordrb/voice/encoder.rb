@@ -93,7 +93,7 @@ module Discordrb::Voice
 
     # encode io raw audio data to other formats. just adding audio header only
     def decode_io(io, options = '')
-      command = "#{ffmpeg_command} -loglevel 0 -f s16le -ar 48000 -ac 2 -i - #{options} pipe:1"
+      command = "#{ffmpeg_command} -f s16le -ar 48000 -ac 2 -i - -f wav #{options} pipe:1"
       IO.popen(command, in: io)
     end
 

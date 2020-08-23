@@ -1,11 +1,11 @@
 
 # encoder may load opus-ruby already
-begin
-  require 'opus-ruby'
-  OPUS_AVAILABLE = true
-rescue LoadError
-  OPUS_AVAILABLE = false
-end
+#begin
+#  require 'opus-ruby'
+#  OPUS_AVAILABLE = true
+#rescue LoadError
+#  OPUS_AVAILABLE = false
+#end
 
 
 # voice decoder
@@ -19,7 +19,7 @@ module Discordrb::Voice
       sample_rate = 48_000
       frame_size = 960
       channels = 2
-      @filter_volume = 1
+      #@filter_volume = 1
 
       raise LoadError, 'Opus unavailable - voice not supported! Please install opus for voice support to work.' unless OPUS_AVAILABLE
 
@@ -27,7 +27,7 @@ module Discordrb::Voice
     end
 
     def decode(data)
-      @opus.decode(data)
+      @opus.decode(data).force_encoding('ASCII-8BIT')
     end
 
     # reset decoder

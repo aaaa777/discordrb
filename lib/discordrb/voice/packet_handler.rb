@@ -4,7 +4,10 @@ require 'timeout'
 module Discordrb::Voice
 
   # Audio data identify header
-  AUDIO_DATA_IDENTIFIER = String.new("\x80x", encoding: ::Encoding::ASCII_8BIT)
+  AUDIO_DATA_IDENTIFIER = String.new("\x80\x78", encoding: ::Encoding::ASCII_8BIT)
+
+  # user audio?
+  USER_AUDIO_IDENTIFIER = String.new("\x90\x78", encoding: ::Encoding::ASCII_8BIT)
 
   # grace time (ms / 1000)
   BUFFER_GRACE_TIME = 200.0 / 1000
@@ -154,7 +157,7 @@ module Discordrb::Voice
       while true
         packet = await_packet(**options)
         buffer = yield(packet)
-        p buffer, buffer.size
+        #p buffer, buffer.size
         writer.write(buffer)
       end
     end
@@ -203,7 +206,7 @@ module Discordrb::Voice
     end
 
     # this method helps awaiting packet with timeout and filtering sequence(audio packet only now)
-    def await_next_packet(timeout, buffer: buffer, next_sequence: next_seq = nil, **options)
+    def await_next_packet(timeout, buffer: buffer_stack, next_sequence: next_seq = nil, **options)
       type = options[:packet_type]
       begin
         Timeout.new(timeout) do
@@ -215,7 +218,7 @@ module Discordrb::Voice
               when :audio
                 seq = packet[2..3].unpack1('n')
                 next packet if seq == next_seq
-                buffer[seq] = packet
+                buffer_stack[seq] = packet
               else
                 packet
               end
@@ -340,7 +343,7 @@ module Discordrb::Voice
         packet_data.force_encoding('ASCII-8BIT')
         
         case packet_data[0..1]
-        when AUDIO_DATA_IDENTIFIER
+        when AUDIO_DATA_IDENTIFIER, USER_AUDIO_IDENTIFIER
           # for debug
           seq = packet_data[2..3].unpack1('n')
           timestamp = packet_data[4..7].unpack1('N')
