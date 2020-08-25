@@ -130,9 +130,11 @@ module Discordrb::Voice
     # call packethandler#create_io
     def create_audio_io(user, **options)
       user = user.resolve_id
+      # start packet handler
       @packet_handler.start unless @packet_handler.is_active?
 
       decoder = Discordrb::Voice::Decoder.new
+      #decoder.reset
       #options[:packet_type] = :audio
 
       # see packethandler#create_io description
@@ -145,8 +147,11 @@ module Discordrb::Voice
         ssrc = packet_data[8..11].unpack1('N')
 
         audio_data = receive_audio(packet_data)
+        #p audio_data#.slice!(2..-1)
+        # audio_data should be removed RTP extention header
         buffer = decoder.decode(audio_data)
         p "decoded data: #{buffer.size} bytes"
+        #p buffer
         # decode end
         #buffer.split(//).join("\x00") + "\x00"
         buffer.scan(/../).map{|hex| hex + hex}.join # stereo

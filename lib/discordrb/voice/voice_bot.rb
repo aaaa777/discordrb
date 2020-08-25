@@ -303,7 +303,7 @@ module Discordrb::Voice
 
     def create_io_by_user(user, **options)
       user = user.resolve_id
-      io = @udp.create_audio_io(user, options)
+      io = @udp.create_audio_io(user, **options)
       @encoder.decode_io(io)
     end
 
@@ -381,7 +381,7 @@ module Discordrb::Voice
         end
 
         # If paused, wait
-        sleep 0.1 while @paused
+        Thread.pass while @paused
 
         if @length.positive?
           # Wait `length` ms, then send the next packet

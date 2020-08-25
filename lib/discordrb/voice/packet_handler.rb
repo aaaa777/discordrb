@@ -10,7 +10,7 @@ module Discordrb::Voice
   USER_AUDIO_IDENTIFIER = String.new("\x90\x78", encoding: ::Encoding::ASCII_8BIT)
 
   # grace time (ms / 1000)
-  BUFFER_GRACE_TIME = 200.0 / 1000
+  #BUFFER_GRACE_TIME = 20.0 / 1000
 
   class PacketHandler
     attr_writer :master_filter
@@ -20,8 +20,8 @@ module Discordrb::Voice
       @socket = udp_socket
       @user_ssrc = {}
 
-      @await_threads = {}
-      @dest_threads = nil
+      #@await_threads = {}
+      @threads = {}
       #@await_threads[:all] = []
       
       # init packet reveiving loop
@@ -53,16 +53,31 @@ module Discordrb::Voice
       @packet_handling
     end
 
+    # io loop selector and io constructer
     # create io stream by recieved packets with user filter
     # block is given packet data and it should return decoded io buffer
     def create_io(**options, &block)
       user = options[:user].resolve_id if options[:user]
+      type = options[:packet_type] ? options[:packet_type] : :all
       reader, writer = IO.pipe
-      Thread.new do
+      
+      @threads[options] = Thread.new do
         Thread.current[:discordrb_name] = "#{user} voice stream"
+        case type
+        when :audio
+          # ser raw udp packet buffer
+          # seq => packet
+          Thread.current[:buffer] = {}
+          push_io_audio_loop(writer, **options, &block)
+        when :all
+          # recv packet into arr <<
+          Thread.current[:buffer] = []
+          push_io_loop(writer, **options, &block)
+        else
+          raise "packet type: #{type} is not defined"
+        end
         # debug
         #Thread.current[:recorder_log_mode] = options[:log_mode]
-        push_io_loop(writer, **options, &block)
       end
 
       reader
@@ -70,6 +85,7 @@ module Discordrb::Voice
 
     #def create_event(**options, &block) plan
 
+    # depricated method
     # debug and private
     # blocking method
     # await packet receive flag
@@ -97,11 +113,28 @@ module Discordrb::Voice
       # @await_threads[packet_type] = [] unless @await_threads[packet_type] 
       @await_threads[options] = thread
       p "awaits #{options}"
+
       # blocking thread till receive packet
-      thread.join
+      if options[:writer]
+        options[:writer].write(thread.value) 
+      else
+        thread.join
+      end
       # block while @packet_was_received is true
       Thread.pass while @received_packet_data
       thread.value
+    end
+
+    # 
+    def get_next_audio_packet(seq)# = nil)
+
+      #seq = Thread.current[:first_packet][:sequence] unless seq
+      # temp
+      # 後でソートは実装、とりあえず到着順に返すブロッキング
+      Thread.pass while Thread.current[:buffer].empty?
+      Thread.current[:buffer].shift.last
+
+      #Thread.current[:buffer].delete(seq)
     end
 
     # visiblity private
@@ -113,17 +146,29 @@ module Discordrb::Voice
       #attribute = options[:packet_attr]
       #return unless type == :all
       # set data
-      @received_packet_data = data
+      #@received_packet_data = data
       #@received_packet_attr = attribute
       # set packet type
-      @received_packet_type = type
+      #@received_packet_type = type
       
       # emit objective threads
-      @dest_threads = []
-      @await_threads.delete_if{|key_options, th| match_options?(options, key_options) ? @dest_threads << th : nil}
-      p "packet received #{options}, emit ths: #{@dest_threads.size}"
+      #@dest_threads = []
+      #@await_threads.delete_if{|key_options, th| match_options?(options, key_options) ? @dest_threads << th : nil}
+      @threads.each do |key_options, th|
+        next unless match_options?(options, key_options)
+        case type
+        when :audio
+          th[:first_packet] = options unless th[:first_packet]
+          th[:buffer][options[:sequence]] = data, options
+        else
+          th[:buffer] << data
+        end
+      end
+      p "packet received #{options}"#, emit ths: #{@dest_threads.size}"
       # await threads
-      @dest_threads.each{|th| th.join}
+      #@dest_threads.each{|th| th.join}
+      # push_ioのメインループのスレッドにバッファ属性を持たせてth[:buffer]からパケットを流すように変更予定
+      #Thread.pass
       #@await_threads[type].each{|th| th.join}
       #@await_threads[:all].each{|th| th.join}
 
@@ -132,9 +177,9 @@ module Discordrb::Voice
 
       # clear data 
       #@received_packet_attr = nil
-      @received_packet_type = nil
-      @received_packet_data = nil
-      @dest_threads = nil
+      #@received_packet_type = nil
+      #@received_packet_data = nil
+      #@dest_threads = nil
       
       # emit signal
       #@packet_was_received = true
@@ -152,14 +197,26 @@ module Discordrb::Voice
       end
     end
 
-    def push_io_loop(writer, **options)
+    # @block is decode section
+    def push_io_audio_loop(writer, **options, &block)
+
+      #type = options[:packet_type] ? options[:packet_type] : :all
+      # block until first packet arrive
+      Thread.pass until Thread.current[:first_packet]
+      last_seq = Thread.current[:first_packet][:seq]
       
+
       while true
-        packet = await_packet(**options)
-        buffer = yield(packet)
+
+        #packet, packet_options = get_packet(**options)
+        packet, opt = get_next_audio_packet(last_seq)
+        buffer = yield(packet, opt)
         #p buffer, buffer.size
         writer.write(buffer)
+
+        increment_sequence(last_seq)
       end
+      writer.close
     end
 
     def push_io_loop2(writer, target, **options)
